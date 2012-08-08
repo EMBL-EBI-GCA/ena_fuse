@@ -1,0 +1,2 @@
+Line 1 of file2.txt
+Line 2 of file2.txt
