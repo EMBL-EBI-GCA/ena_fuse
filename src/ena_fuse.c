@@ -91,9 +91,10 @@ static int ena_open(const char *client_path, struct fuse_file_info *fi)
 static int ena_read(const char *path, char *buf, size_t size, off_t offset,
 		    struct fuse_file_info *fi)
 {
-        if (pread(fi->fh, buf, size, offset) < 0)
+        int ret = 0;
+        if ((ret = pread(fi->fh, buf, size, offset)) < 0)
             return -errno;
-        return 0;
+        return ret;
 }
 
 static int ena_release(const char *path, struct fuse_file_info *fi)
