@@ -1,6 +1,6 @@
 #include "ena_data.h"
 
-static int _read_to_buffer(char** buffer, char* filename, long* file_size)
+static int _read_to_buffer(char** buffer, const char* filename, long* file_size)
 {
   FILE *fh;
   size_t result;
@@ -22,14 +22,20 @@ static int _read_to_buffer(char** buffer, char* filename, long* file_size)
   return 0;
 }
 
-ena_data* init_ena_data(char *rootdir) {
+ena_data* init_ena_data(const char *rootdir, const char* permissions_file, const char* paths_file) {
+  ena_data* new_enad;
   ena_object *dirstruct = init_ena_object(rootdir, true);
   if (dirstruct == NULL) {return NULL;}
-  ena_data* new_enad = (ena_data*) malloc(sizeof(ena_data));
+  new_enad = (ena_data*) malloc(sizeof(ena_data));
   if (new_enad == NULL) {fputs ("Memory error\n",stderr); return NULL;}
   new_enad->dirstruct = dirstruct;
   kv_init(new_enad->permissions);
   kv_init(new_enad->studies);
+  new_enad->refresh_num = 0;
+  new_enad->permissions_file = permissions_file;
+  new_enad->paths_file = paths_file;
+  new_enad->has_data = false;
+  new_enad->rootdir = rootdir;
   return new_enad;
 }
 
@@ -45,14 +51,15 @@ void destroy_ena_data(ena_data* enad) {
   return;
 }
 
-ena_dir_list* init_ena_dir_list() {
+ena_dir_list* init_ena_dir_list(const int refresh_num) {
   ena_dir_list* new_enadl = (ena_dir_list*) malloc(sizeof(ena_dir_list));
   if (new_enadl == NULL) {fputs ("Memory error\n",stderr); return NULL;}
-  kv_init(*new_enadl);
+  kv_init(new_enadl->contents);
+  new_enadl->refresh_num = refresh_num;
   return new_enadl;
 }
 void destroy_ena_dir_list(ena_dir_list* enadl) {
-  kv_destroy(*enadl);
+  kv_destroy(enadl->contents);
   free(enadl);
   return;
 }
@@ -66,14 +73,14 @@ void destroy_ena_dir_list(ena_dir_list* enadl) {
  * e.g: streeter ERS000001 streeterERS000001password
  * returns 0 if file is read successfully and dirstruct is created
 */
-int add_permissions_from_file(ena_data* my_ena_data, char* filename)
+int add_permissions_from_file(ena_data* my_ena_data)
 {
   long file_size;
   char *buffer = NULL;
   char *ptr, *line_end;
   int res;
 
-  res = _read_to_buffer(&buffer, filename, &file_size);
+  res = _read_to_buffer(&buffer, my_ena_data->permissions_file, &file_size);
   if (res != 0) return res;
 
   ptr = buffer;
@@ -102,13 +109,13 @@ int add_permissions_from_file(ena_data* my_ena_data, char* filename)
  * e.g: ERS000001 subdir/file1.fastq.gz
  * returns 0 if file is read successfully and dirstruct is created
 */
-int add_dirstruct_from_file(ena_data* my_ena_data, char* filename) {
+int add_dirstruct_from_file(ena_data* my_ena_data) {
   long file_size;
   char *line_start, *line_end;
   char *buffer = NULL;
   int res;
 
-  res = _read_to_buffer(&buffer, filename, &file_size);
+  res = _read_to_buffer(&buffer, my_ena_data->paths_file, &file_size);
   if (res != 0) return res;
 
   line_start = buffer;
@@ -143,27 +150,29 @@ int add_dirstruct_from_file(ena_data* my_ena_data, char* filename) {
   return 0;
 }
 
-
 /*
- * returns 0 for success, -1 for error
+ * on success, .has_data is set to true and return value is 0
+ * on failure, .has_data is set to false and return value is -1
 */
-int refresh_ena_permissions(ena_data* enad, char* filename) {
+int refresh_ena_data(ena_data* enad) {
+  enad->has_data = false;
+  enad->refresh_num ++;
   while (kv_size(enad->permissions) > 0)
     destroy_ena_permission(kv_pop(enad->permissions));
-  return add_permissions_from_file(enad, filename);
-}
-
-/*
- * returns 0 for success, -1 for error
-*/
-int refresh_ena_dirstruct(ena_data* enad, char* filename) {
-  ena_object *new_enad = init_ena_object(enad->dirstruct->name, true);
-  if (new_enad == NULL) {return -1;}
-  destroy_ena_object(enad->dirstruct);
-  enad->dirstruct = new_enad;
   while (kv_size(enad->studies) > 0)
     free(kv_pop(enad->studies));
-  return add_dirstruct_from_file(enad, filename);
+  destroy_ena_object(enad->dirstruct);
+  
+  ena_object *dirstruct = init_ena_object(enad->rootdir, true);
+  if (dirstruct == NULL) {return -1;}
+  enad->dirstruct = dirstruct;
+
+  if (add_permissions_from_file(enad) != 0)
+    return -1;
+  if (add_dirstruct_from_file(enad) != 0)
+    return -1;
+  enad->has_data = true;
+  return 0;
 }
 
 
@@ -295,8 +304,8 @@ int fill_dir_list(ena_data* my_ena_data, const char* client_path, ena_dir_list *
     if (check_object_matches_study(sub_object, pp.study) == true) {
       sprintf(host_path, "%s/%s/%s", my_ena_data->dirstruct->name, pp.filepath, sub_object->name);
       if (stat(host_path, &buf) == 0) {
-          kv_a(const char*, *dir_list, j) = sub_object->name;
-          if (dir_list->a == NULL) {fputs ("Memory error\n",stderr); return -2;}
+          kv_a(const char*, dir_list->contents, j) = sub_object->name;
+          if (dir_list->contents.a == NULL) {fputs ("Memory error\n",stderr); return -2;}
           j++;
       }
     }

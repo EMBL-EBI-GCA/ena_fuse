@@ -14,6 +14,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include "ena_data.h"
 
 // default file permissions, read-only for everybody
@@ -21,12 +22,21 @@
 // default folder permissions, read-only access for everybody
 #define DIR_MODE 0555
 
+volatile sig_atomic_t refresh_data = 0;
+
 static int ena_getattr(const char *client_path, struct stat *stbuf)
 {
 	int res = 0;
         char host_path[PATH_MAX];
         ena_data *pd = (ena_data*) (fuse_get_context()->private_data);
 	memset(stbuf, 0, sizeof(struct stat));
+
+        if (refresh_data) {
+          refresh_data = 0;
+          refresh_ena_data(pd);
+        }
+        if (! pd->has_data)
+          return -EHOSTDOWN;
 
         res = get_host_path(pd, client_path, host_path);
         if (res != 0)
@@ -47,6 +57,13 @@ static int ena_access(const char *client_path, int mask)
         char host_path[PATH_MAX];
         ena_data *pd = (ena_data*) (fuse_get_context()->private_data);
 
+        if (refresh_data) {
+          refresh_data = 0;
+          refresh_ena_data(pd);
+        }
+        if (! pd->has_data)
+          return -EHOSTDOWN;
+
         res = get_host_path(pd, client_path, host_path);
         if (res != 0)
           return -ENOENT;
@@ -62,6 +79,13 @@ static int ena_readlink(const char *client_path, char *buf, size_t size)
         int res = 0;
         char host_path[PATH_MAX];
         ena_data *pd = (ena_data*) (fuse_get_context()->private_data);
+        if (refresh_data) {
+          refresh_data = 0;
+          refresh_ena_data(pd);
+        }
+        if (! pd->has_data)
+          return -EHOSTDOWN;
+
         res = get_host_path(pd, client_path, host_path);
         if (res != 0)
           return -ENOENT;
@@ -76,6 +100,13 @@ static int ena_open(const char *client_path, struct fuse_file_info *fi)
         int fd;
         char host_path[PATH_MAX];
         ena_data *pd = (ena_data*) (fuse_get_context()->private_data);
+        if (refresh_data) {
+          refresh_data = 0;
+          refresh_ena_data(pd);
+        }
+        if (! pd->has_data)
+          return -EHOSTDOWN;
+
         if (get_host_path(pd, client_path, host_path) != 0)
           return -ENOENT;
         if ((fi->flags & 3) != O_RDONLY)
@@ -107,7 +138,14 @@ static int ena_release(const char *path, struct fuse_file_info *fi)
 static int ena_opendir(const char *client_path, struct fuse_file_info *fi)
 {
     ena_data *pd = (ena_data*) (fuse_get_context()->private_data);
-    ena_dir_list *dir_list = init_ena_dir_list();
+    if (refresh_data) {
+      refresh_data = 0;
+      refresh_ena_data(pd);
+    }
+    if (! pd->has_data)
+      return -EHOSTDOWN;
+
+    ena_dir_list *dir_list = init_ena_dir_list(pd->refresh_num);
     switch (fill_dir_list(pd, client_path, dir_list)) {
         case -2:
           destroy_ena_dir_list(dir_list);
@@ -137,12 +175,15 @@ static int ena_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 {
     int i;
     ena_dir_list *dir_list = (ena_dir_list*) (fi->fh);
+    ena_data *pd = (ena_data*) (fuse_get_context()->private_data);
     if (dir_list == NULL)
       return -ENOENT;
+    if (dir_list->refresh_num != pd->refresh_num)
+      return  -ESTALE;
     if (filler(buf, ".", NULL, 0) != 0 || filler(buf, "..", NULL, 0) != 0)
       return -ENOMEM;
-    for (i=0; i<kv_size(*dir_list); i++)
-      if (filler(buf, kv_A(*dir_list, i), NULL, 0) != 0)
+    for (i=0; i<kv_size(dir_list->contents); i++)
+      if (filler(buf, kv_A(dir_list->contents, i), NULL, 0) != 0)
         return -ENOMEM;
     return 0;
 }
@@ -167,6 +208,11 @@ void usage()
     exit(1);
 }
 
+void catch_sigusr1(int sig) {
+  refresh_data = 1;
+  signal(sig, catch_sigusr1);
+}
+
 int main(int argc, char *argv[])
 {
     int i;
@@ -185,13 +231,16 @@ int main(int argc, char *argv[])
     paths_file = realpath(argv[i+3], NULL);
     argc -= 3;
 
-    my_ena_data = init_ena_data(root_dir);
+    my_ena_data = init_ena_data(root_dir, permissions_file, paths_file);
     if (my_ena_data == NULL)
       return EXIT_FAILURE;
-    if (add_permissions_from_file(my_ena_data, permissions_file) != 0)
+    if (add_permissions_from_file(my_ena_data) != 0)
       return EXIT_FAILURE;
-    if (add_dirstruct_from_file(my_ena_data, paths_file) != 0)
+    if (add_dirstruct_from_file(my_ena_data) != 0)
       return EXIT_FAILURE;
+    my_ena_data->has_data = true;
+
+    signal(SIGUSR1, catch_sigusr1);
 
     fuse_stat = fuse_main(argc, argv, &ena_oper, my_ena_data);
     
