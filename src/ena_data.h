@@ -9,6 +9,7 @@
 #include <limits.h>
 #include "kvec.h"
 #include <sys/stat.h>
+#include <unistd.h>
 
 
 /*

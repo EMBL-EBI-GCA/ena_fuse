@@ -227,6 +227,7 @@ static int parse_client_path (const char *client_path, ena_data* my_ena_data, st
       return ret;
     }
   }
+  sleep(1);
   return -1;
 }
 
